@@ -34,6 +34,7 @@ v2.0.3 - 05/11/2023 - Fixed bug with memmap and file.seek
 
 from __future__ import division  # for those using Python 2.6+
 
+import math
 from collections import namedtuple
 from datetime import datetime
 from math import ceil
@@ -1151,16 +1152,16 @@ class NsxFile:
         
         # Measure file size
         self.datafile.seek(self.basic_header["BytesInHeader"], 0)  # Reset to end of header / start of data
-        eoh = self.datafile.tell()
+        end_of_header = self.datafile.tell()
         self.datafile.seek(0, 2)
-        eof = self.datafile.tell()
+        end_of_file = self.datafile.tell()
 
         # Quick scan - get data headers and lazy-load data
-        self.datafile.seek(eoh, 0)  # Reset back to end of header
+        self.datafile.seek(end_of_header, 0)  # Reset back to end of header
         if filespec_maj == 2 and filespec_min == 1:
             # Assume 1 segment
             timestamp = TIMESTAMP_NULL_21
-            num_data_pts = (eof - eoh) // data_pt_size
+            num_data_pts = (end_of_file - end_of_header) // data_pt_size
             output["data_headers"].append({
                 "Timestamp": timestamp,
                 "NumDataPoints": num_data_pts,
@@ -1171,7 +1172,7 @@ class NsxFile:
                     self.datafile,
                     dtype=np.int16,
                     mode="r",
-                    offset=eoh,
+                    offset=end_of_header,
                     shape=(num_data_pts, self.basic_header["ChannelCount"])
                 )
             )
@@ -1189,49 +1190,58 @@ class NsxFile:
             samp_per_pkt = False
             if filespec_maj >= 3:
                 # Starty by assuming that these files are from firmware >= 7.6 thus we have 1 sample per packet.
-                npackets = int((eof - eoh) / np.dtype(ptp_dt).itemsize)
-                struct_arr = np.memmap(self.datafile, dtype=ptp_dt, shape=npackets, offset=eoh, mode="r")
-                self.datafile.seek(eoh, 0)  # Reset to end-of-header in case memmap moved the pointer.
+                npackets = int((end_of_file - end_of_header) / np.dtype(ptp_dt).itemsize)
+                struct_arr = np.memmap(self.datafile, dtype=ptp_dt, shape=npackets, offset=end_of_header, mode="r")
+                self.datafile.seek(end_of_header, 0)  # Reset to end-of-header in case memmap moved the pointer.
                 samp_per_pkt = np.all(struct_arr["num_data_points"] == 1)  # Confirm 1 sample per packet
 
             if not samp_per_pkt:
                 # Multiple samples per packet; 1 packet == 1 uninterrupted segment.
                 while 0 < self.datafile.tell() < ospath.getsize(self.datafile.name):
                     # boh = self.datafile.tell()  # Beginning of segment header
-                    self.datafile.seek(1, 1)  # Skip the reserved 0x01
+                    segment_header = unpack("<B", self.datafile.read(1))[0]
+                    if not segment_header == 0x01:
+                        # You'd expect this to be an error, no? But there was a specific bug where files didn't have
+                        # this header and we need to handle it.
+                        size_of_file_left = ospath.getsize(self.datafile.name) - self.datafile.tell()
+                        channel_count = self.basic_header["ChannelCount"]
+                        num_data_pts = math.floor((size_of_file_left - 1) / (channel_count * 2))
+                        segment_count = num_data_pts / self.basic_header['SampleResolution']
+                        break
+
                     timestamp = unpack(ts_type, self.datafile.read(ts_size))[0]
                     num_data_pts = unpack("<I", self.datafile.read(4))[0]
-                    timestamp = timestamp + (clk_per_samp * np.arange(num_data_pts)).astype(np.int64 if ts_size==8 else np.int32)
+                    # timestamps = None # timestamp + (clk_per_samp * np.arange(num_data_pts)).astype(np.int64 if ts_size==8 else np.int32)
+                    timestamps = timestamp + (clk_per_samp * np.arange(num_data_pts)).astype(np.int64 if ts_size == 8 else np.int32)
                     bod = self.datafile.tell()  # Beginning of segment data
                     output["data_headers"].append({
-                        "Timestamp": timestamp,
+                        "Timestamp": timestamps,
                         "NumDataPoints": num_data_pts,
                         "data_time_s": num_data_pts / output["samp_per_s"]
                     })
-                    output["data"].append(np.memmap(
-                        self.datafile,
-                        dtype="int16",
-                        mode="r",
-                        offset=bod,
-                        shape=(num_data_pts, self.basic_header["ChannelCount"]),
-                        order="C"
+                    print(f'Reading segment at {bod} with {num_data_pts} data points.')
+                    output["data"].append(
+                        np.memmap(
+                            self.datafile,
+                            dtype="int16",
+                            mode="r",
+                            offset=bod,
+                            shape=(num_data_pts, self.basic_header["ChannelCount"]),
+                            order="C"
                     ))
                     # memmap moves the file pointer inconsistently depending on platform and numpy version
                     curr_loc = self.datafile.tell()
                     expected_loc = bod + num_data_pts * data_pt_size
-                    if curr_loc == bod:
-                        # It did not move the pointer at all. Move it manually.
-                        self.datafile.seek(expected_loc - bod, 1)
-                    elif curr_loc > expected_loc:
-                        # Moved it too far (probably to end of file); move manually from beginning to expected.
-                        self.datafile.seek(expected_loc, 0)
+
+                    # memap moved the cursor to the end. Move it back to the expected location.
+                    self.datafile.seek(expected_loc, 0)
             else:
                 # 1 sample per packet. Reuse struct_arr.
                 seg_thresh_clk = 2 * clk_per_samp
                 seg_starts = np.hstack((0, 1 + np.argwhere(np.diff(struct_arr["timestamps"]) > seg_thresh_clk).flatten()))
                 for seg_ix, seg_start_idx in enumerate(seg_starts):
                     seg_stop_idx = seg_starts[seg_ix + 1] if seg_ix < (len(seg_starts) - 1) else (len(struct_arr) - 1)
-                    offset = eoh + seg_start_idx * struct_arr.dtype.itemsize
+                    offset = end_of_header + seg_start_idx * struct_arr.dtype.itemsize
                     num_data_pts = seg_stop_idx - seg_start_idx
                     seg_struct_arr = np.memmap(self.datafile, dtype=ptp_dt, shape=num_data_pts, offset=offset, mode="r")
                     output["data_headers"].append({
