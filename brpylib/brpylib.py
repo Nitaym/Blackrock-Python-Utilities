@@ -1200,15 +1200,18 @@ class NsxFile:
                 while 0 < self.datafile.tell() < ospath.getsize(self.datafile.name):
                     # boh = self.datafile.tell()  # Beginning of segment header
                     segment_header = unpack("<B", self.datafile.read(1))[0]
-                    if not segment_header == 0x01:
-                        # You'd expect this to be an error, no? But there was a specific bug where files didn't have
-                        # this header and we need to handle it.
+                    if segment_header == 0x01:
+                        # Segment header verfied
+                        pass
+                    else:
+                        # While this should be an error, There was a specific bug in some versions where the segment
+                        # didn't write its header properly - We're accounting for that.
+                        # Revert the file pointer to the start of the segment header
+                        self.datafile.seek(-1, 1)
                         size_of_file_left = ospath.getsize(self.datafile.name) - self.datafile.tell()
                         channel_count = self.basic_header["ChannelCount"]
-                        num_data_pts = math.floor((size_of_file_left - 1) / (channel_count * 2))
+                        num_data_pts = math.floor(size_of_file_left / (channel_count * 2))
                         segment_count = num_data_pts / self.basic_header['SampleResolution']
-                        break
-
                     timestamp = unpack(ts_type, self.datafile.read(ts_size))[0]
                     num_data_pts = unpack("<I", self.datafile.read(4))[0]
                     # timestamps = None # timestamp + (clk_per_samp * np.arange(num_data_pts)).astype(np.int64 if ts_size==8 else np.int32)
