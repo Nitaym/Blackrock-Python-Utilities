@@ -1202,20 +1202,21 @@ class NsxFile:
                     segment_header = unpack("<B", self.datafile.read(1))[0]
                     if segment_header == 0x01:
                         # Segment header verfied
-                        pass
+                        timestamp = unpack(ts_type, self.datafile.read(ts_size))[0]
+                        num_data_pts = unpack("<I", self.datafile.read(4))[0]
                     else:
                         # While this should be an error, There was a specific bug in some versions where the segment
                         # didn't write its header properly - We're accounting for that.
+
                         # Revert the file pointer to the start of the segment header
                         self.datafile.seek(-1, 1)
                         size_of_file_left = ospath.getsize(self.datafile.name) - self.datafile.tell()
                         channel_count = self.basic_header["ChannelCount"]
                         num_data_pts = math.floor(size_of_file_left / (channel_count * 2))
                         segment_count = num_data_pts / self.basic_header['SampleResolution']
-                    timestamp = unpack(ts_type, self.datafile.read(ts_size))[0]
-                    num_data_pts = unpack("<I", self.datafile.read(4))[0]
-                    # timestamps = None # timestamp + (clk_per_samp * np.arange(num_data_pts)).astype(np.int64 if ts_size==8 else np.int32)
-                    timestamps = timestamp + (clk_per_samp * np.arange(num_data_pts)).astype(np.int64 if ts_size == 8 else np.int32)
+
+                    timestamps = None # timestamp + (clk_per_samp * np.arange(num_data_pts)).astype(np.int64 if ts_size==8 else np.int32)
+                    # timestamps = timestamp + (clk_per_samp * np.arange(num_data_pts)).astype(np.int64 if ts_size == 8 else np.int32)
                     bod = self.datafile.tell()  # Beginning of segment data
                     output["data_headers"].append({
                         "Timestamp": timestamps,
@@ -1254,7 +1255,10 @@ class NsxFile:
                     })
                     output["data"].append(seg_struct_arr["samples"])
 
+        return output
+
         ## Post-processing ##
+        # This whole part assumes we can read all of the data at one shot - Which cannot happen. We need to rewrite this
 
         # Drop segments that are not within the requested time window
         ts_0 = output["data_headers"][0]["Timestamp"][0]
