@@ -1222,7 +1222,7 @@ class NsxFile:
                         "NumDataPoints": num_data_pts,
                         "data_time_s": num_data_pts / output["samp_per_s"]
                     })
-                    print(f'Reading segment at {bod} with {num_data_pts} data points.')
+                    # print(f'Reading segment at {bod} with {num_data_pts} data points.')
                     output["data"].append(
                         np.memmap(
                             self.datafile,
